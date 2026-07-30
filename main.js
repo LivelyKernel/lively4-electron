@@ -8,7 +8,10 @@ const LIVELY_URL = 'http://localhost:9005/lively4-core/start.html'
 const SERVER_ORIGIN = 'http://localhost:9005'
 const GIT_BASH = 'C:\\Program Files\\Git\\bin\\bash.exe'
 const SERVER_SCRIPT = 'lively4-server/bin/lively4W1.sh'
-const LIVELY_DIR = 'C:\\Users\\Stefan\\lively\\lively4'
+// The shell lives at <parent>/lively4-electron; the world at <parent>/lively4.
+// Derive rather than hardcode so a clone runs anywhere. Override with LIVELY_DIR
+// in the environment if the checkout is laid out differently.
+const LIVELY_DIR = process.env.LIVELY_DIR || path.resolve(__dirname, '..', 'lively4')
 
 // --- switches that must be set before app is ready ------------------------
 
