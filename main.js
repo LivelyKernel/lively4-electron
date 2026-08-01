@@ -13,6 +13,14 @@ const SERVER_SCRIPT = 'lively4-server/bin/lively4W1.sh'
 // in the environment if the checkout is laid out differently.
 const LIVELY_DIR = process.env.LIVELY_DIR || path.resolve(__dirname, '..', 'lively4')
 
+// The local whisper.cpp voice service (optional). Sibling of lively4/, outside
+// the served root. Started only when installed and not already running; voice
+// transcription degrades gracefully (OpenAI whisper / Web Speech) when absent.
+const WHISPER_DIR = process.env.WHISPER_DIR || path.resolve(LIVELY_DIR, '..', 'whisper')
+const WHISPER_EXE = path.join(WHISPER_DIR, 'whisper-bin', 'Release', 'whisper-server.exe')
+const WHISPER_MODEL = path.join(WHISPER_DIR, 'ggml-large-v3-turbo-q5_0.bin')
+const WHISPER_ORIGIN = 'http://127.0.0.1:8080'
+
 // --- switches that must be set before app is ready ------------------------
 
 // Fixed CDP port so chrome-devtools-mcp can attach with --browserUrl. A property
@@ -29,6 +37,7 @@ fs.mkdirSync(USER_DATA, { recursive: true })
 app.setPath('userData', USER_DATA)
 
 let serverProcess = null
+let whisperProcess = null
 
 // --- lively4-server child -------------------------------------------------
 
@@ -66,6 +75,38 @@ async function startServer() {
     await new Promise(r => setTimeout(r, 250))
   }
   console.warn('[shell] server did not answer within 60s — loading anyway')
+}
+
+// --- whisper.cpp voice service (optional) ---------------------------------
+
+function whisperIsUp() {
+  return new Promise(resolve => {
+    const req = http.get(WHISPER_ORIGIN + '/', res => { res.resume(); resolve(true) })
+    req.setTimeout(1200, () => { req.destroy(); resolve(false) })
+    req.on('error', () => resolve(false))
+  })
+}
+
+// Launch the local whisper server if installed and not already up. cwd is the
+// Release dir so its CUDA/cuBLAS DLLs resolve. Fire-and-forget — the window
+// never waits on it, and a missing install is a skip, not an error.
+async function startWhisper() {
+  if (await whisperIsUp()) {
+    console.log('[shell] whisper already running — not spawning')
+    return
+  }
+  if (!fs.existsSync(WHISPER_EXE) || !fs.existsSync(WHISPER_MODEL)) {
+    console.log('[shell] whisper not installed — skipping (voice will fall back)')
+    return
+  }
+  whisperProcess = spawn(WHISPER_EXE, ['-m', WHISPER_MODEL, '--host', '127.0.0.1', '--port', '8080'], {
+    cwd: path.dirname(WHISPER_EXE),
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  whisperProcess.stdout.on('data', d => process.stdout.write('[whisper] ' + d))
+  whisperProcess.stderr.on('data', d => process.stderr.write('[whisper] ' + d))
+  whisperProcess.on('exit', code => { console.log('[shell] whisper exited', code); whisperProcess = null })
+  console.log('[shell] whisper starting (GPU model load ~2-3s)')
 }
 
 // --- capability bridge ----------------------------------------------------
@@ -159,12 +200,27 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     configurePermissions()
     await startServer()
+    startWhisper()          // fire-and-forget: warms up while the window loads
     await createWindow()
   })
 }
 
 app.on('window-all-closed', () => app.quit())
 
+// Kill a spawned child and its whole tree (taskkill /T) so no node/bash/helper
+// orphans linger after the shell exits.
+function killTree(proc) {
+  if (!proc || proc.killed) return
+  try {
+    if (process.platform === 'win32') spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'])
+    else proc.kill()
+  } catch (e) { /* already gone */ }
+}
+
+// On close, tear down only what the shell OWNS as a disposable resource: whisper.
+// The lively4-server is deliberately NOT killed — it is live-codeable (self-
+// restarts, holds the world + MCP session), so it persists across shell restarts.
+// Start it once and relaunch the shell freely without a cold server start.
 app.on('quit', () => {
-  if (serverProcess) serverProcess.kill()
+  killTree(whisperProcess)
 })
